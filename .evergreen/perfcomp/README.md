@@ -85,3 +85,7 @@ PERF_URI_PRIVATE_ENDPOINT="<perf_uri>" VERSION_ID="<version>" PROJECT="<project>
 ```
 
 If you would like to see a markdown preview of the report, you can also pass in `HEAD_SHA="test"`. This will generate `.evergreen/perfcomp/perf-report.md`.
+
+## Persist data to a perf history cluster
+
+To persist the data for each perf task run to a cluster, you need to add your cluster URI as an env variable in your Evergreen project. Ensure the database is named `perf_data` and the collection used is named `pull_requests`. If the perf task is run on a PR, it will automatically persist the data to your cluster.

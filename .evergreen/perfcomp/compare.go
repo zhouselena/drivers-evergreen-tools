@@ -385,6 +385,101 @@ func getStatSigBenchmarks(energyStats []*EnergyStats) []EnergyStats {
 	return significantEnergyStats
 }
 
+const perfDataDB = "perf_data"
+const pullRequestsColl = "pull_requests"
+
+func PersistHistory(ctx context.Context, perfHistoryConnString string, prNumber string, results *CompareResult, project string) error {
+	if prNumber == "" {
+		return fmt.Errorf("no PR number, skipping persist perf history")
+	}
+
+	// Connect to history cluster
+	client, err := mongo.Connect(options.Client().ApplyURI(perfHistoryConnString))
+	if err != nil {
+		return fmt.Errorf("error connecting client: %v", err)
+	}
+
+	defer func() { // Defer disconnect client
+		err = client.Disconnect(context.Background())
+		if err != nil {
+			log.Fatalf("failed to disconnect client: %v", err)
+		}
+	}()
+
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("error pinging MongoDB Analytics: %v", err)
+	}
+	log.Println("Successfully connected to MongoDB Analytics node.")
+
+	coll := client.Database(perfDataDB).Collection(pullRequestsColl)
+
+	// Add results to perf history
+
+	// check if document for the current PR number exists
+	var existingPRDoc struct {
+		PullRequest string `bson:"pull_request"`
+		PerfHistory []struct {
+			Order int `bson:"order"`
+		} `bson:"perf_history"`
+	}
+
+	err = coll.FindOne(ctx, bson.M{"pull_request": prNumber}).Decode(&existingPRDoc)
+	if err != nil && err != mongo.ErrNoDocuments {
+		return fmt.Errorf("error checking existing document: %v", err)
+	}
+
+	// prepare the perf_history entry from CompareResult
+	var perfHistoryEntries []interface{}
+	for _, es := range results.SigEnergyStats {
+		// TODO; everything is already set up, could just throw ES in
+		perfHistoryEntries = append(perfHistoryEntries, bson.M{
+			"order":           len(existingPRDoc.PerfHistory) + 1,
+			"benchmark":       es.Benchmark,
+			"measurement":     es.Measurement,
+			"patch_version":   es.PatchVersion,
+			"commit_sha":      results.CommitSHA,
+			"mainline_commit": results.MainlineCommit,
+			"stable_region":   es.StableRegion, // TODO: this won't work yet
+			"measurement_val": es.MeasurementVal,
+			"p_change":        es.PercentChange,
+			"e_stat":          es.EnergyStatistic,
+			"t_stat":          es.TestStatistic,
+			"h_score":         es.HScore,
+			"z_score":         es.ZScore,
+		})
+	}
+
+	if err == mongo.ErrNoDocuments { // add new
+		newDocument := bson.M{
+			"pull_request": prNumber,
+			"project":      project,
+			"perf_history": perfHistoryEntries,
+		}
+
+		_, err = coll.InsertOne(ctx, newDocument)
+		if err != nil {
+			return fmt.Errorf("error inserting new document: %v", err)
+		}
+	} else { // update existing
+		update := bson.M{
+			"$push": bson.M{
+				"perf_history": bson.M{
+					"$each": perfHistoryEntries,
+					"$sort": bson.M{"Order": 1}, // preserve order
+				},
+			},
+		}
+
+		_, err = coll.UpdateOne(ctx, bson.M{"PR": prNumber}, update)
+		if err != nil {
+			return fmt.Errorf("error updating existing document: %v", err)
+		}
+	}
+
+	return nil
+}
+
 // Given two matrices, this function returns
 // (e, t, h) = (E-statistic, test statistic, e-coefficient of inhomogeneity)
 func calcEnergyStatistics(x, y *mat.Dense) (float64, float64, float64, error) {

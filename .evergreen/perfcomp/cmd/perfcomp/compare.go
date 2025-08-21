@@ -54,7 +54,7 @@ func newCompareCommand() *cobra.Command {
 		}
 
 		// Run compare function
-		err := runCompare(cmd, args,
+		res, err := runCompare(cmd, args,
 			perfcomp.WithProject(project),
 			perfcomp.WithTask(task),
 			perfcomp.WithVariant(variant),
@@ -62,6 +62,16 @@ func newCompareCommand() *cobra.Command {
 		)
 		if err != nil {
 			log.Fatalf("failed to compare: %v", err)
+		}
+
+		// If perf history URI is provided then assume we want to persist data
+		if perfHistoryConnString := os.Getenv("PERF_HISTORY_URI"); perfHistoryConnString != "" {
+			err := runPersistHistory(cmd, args, perfHistoryConnString, res, project)
+			if err != nil {
+				log.Printf("perf history URI is provided but failed to run persist history: %v", err)
+			} else {
+				log.Printf("Successfully persisted this run's results to a perf history cluster.")
+			}
 		}
 	}
 
@@ -107,7 +117,7 @@ func createComment(result perfcomp.CompareResult) string {
 
 }
 
-func runCompare(cmd *cobra.Command, args []string, opts ...perfcomp.CompareOption) error {
+func runCompare(cmd *cobra.Command, args []string, opts ...perfcomp.CompareOption) (*perfcomp.CompareResult, error) {
 	perfAnalyticsConnString := os.Getenv("PERF_URI_PRIVATE_ENDPOINT")
 	version := args[len(args)-1]
 	opts = append(opts, perfcomp.WithVersion(version))
@@ -141,5 +151,17 @@ func runCompare(cmd *cobra.Command, args []string, opts ...perfcomp.CompareOptio
 		log.Printf("PR commit %s: saved to %s for markdown comment.\n", res.CommitSHA, perfReportFileTxt)
 	}
 
-	return nil
+	return res, nil
+}
+
+func runPersistHistory(cmd *cobra.Command, args []string, perfHistoryConnString string, results *perfcomp.CompareResult, project string) error {
+	prNumber := os.Getenv("PR_NUMBER")
+	if prNumber == "" {
+		return fmt.Errorf("no PR number, skipping persist perf history")
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+	defer cancel()
+
+	return perfcomp.PersistHistory(ctx, perfHistoryConnString, prNumber, results, project)
 }
